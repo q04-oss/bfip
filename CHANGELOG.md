@@ -9,6 +9,25 @@ Versions follow [Semantic Versioning](https://semver.org):
 
 ---
 
+## v0.1.1 — 2026-05-01
+
+Added Stage 1b: background checks (sanctions screening and identity fraud).
+
+### Added
+- Stage 1b between identity confirmation and cooling period
+- Sanctions screening against OFAC, UN, and EU sanctions lists
+- Identity fraud check against known synthetic identity databases
+- `background_checks` table in reference schema
+- Section 3b in PROTOCOL.md covering background check requirements
+- `background_checks` table in reference/schema.sql
+
+### Not changed
+- All four existing stages unchanged
+- All existing tables and fields unchanged
+- No breaking changes
+
+---
+
 ## v0.1.0 — 2026-05-01
 
 Initial draft specification.

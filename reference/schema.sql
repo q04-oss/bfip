@@ -175,7 +175,56 @@ COMMENT ON TABLE identity_credentials IS
     'response_hash proves the stored verification status was not tampered with after receipt. '
     'cooling_app_opens_required stored per-record for historical auditability.';
 
--- BFIP Section 4 | Behavioral signals during cooling period
+-- BFIP Section 3b | Background check records
+CREATE TABLE background_checks (
+    id                              SERIAL PRIMARY KEY,
+    user_id                         INTEGER NOT NULL REFERENCES users(id),
+    identity_credential_id          INTEGER NOT NULL
+                                    REFERENCES identity_credentials(id),
+                                    -- background check uses identity confirmed by Stripe
+    provider                        TEXT NOT NULL
+                                    CHECK (provider IN (
+                                        'comply_advantage',
+                                        'refinitiv',
+                                        'lexisnexis',
+                                        'socure'
+                                    )),
+    check_type                      TEXT NOT NULL
+                                    CHECK (check_type IN (
+                                        'sanctions',
+                                        'identity_fraud'
+                                    )),
+                                    -- criminal and adverse_media reserved for future versions
+    external_check_id               TEXT,
+                                    -- provider-assigned check identifier for audit
+    status                          TEXT NOT NULL DEFAULT 'pending'
+                                    CHECK (status IN (
+                                        'pending',
+                                        'passed',
+                                        'failed',
+                                        'review_required',
+                                        'expired'
+                                    )),
+    response_hash                   TEXT,
+                                    -- HMAC-SHA256 of raw provider response
+                                    -- proves stored result was not tampered with
+    checked_at                      TIMESTAMPTZ,
+                                    -- when provider returned result
+    expires_at                      TIMESTAMPTZ,
+                                    -- checks have validity period (default 12 months)
+                                    -- expired checks must be re-run before proceeding
+    created_at                      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE background_checks IS
+    'BFIP Section 3b. Background check records — sanctions and identity fraud screening. '
+    'Initiated after Stage 1 identity confirmation, must pass before Stage 2 cooling period. '
+    'Box Fraise stores pass/fail signal only — never underlying identity data. '
+    'response_hash proves stored result matches provider response. '
+    'Two checks required per user: sanctions AND identity_fraud. '
+    'criminal and adverse_media check types reserved for future protocol versions.';
+
+
 CREATE TABLE cooling_period_events (
     id                              SERIAL PRIMARY KEY,
     user_id                         INTEGER NOT NULL REFERENCES users(id),
@@ -1204,6 +1253,10 @@ CREATE TABLE verification_events (
     event_type                      TEXT NOT NULL
                                     CHECK (event_type IN (
                                         'identity_confirmed',
+                                        'background_check_initiated',
+                                        'background_check_passed',
+                                        'background_check_failed',
+                                        'background_check_review_required',
                                         'cooling_period_started',
                                         'cooling_app_open_recorded',
                                         'cooling_period_completed',
@@ -1422,6 +1475,10 @@ CREATE INDEX idx_magic_link_tokens_user_id ON magic_link_tokens(user_id);
 CREATE INDEX idx_jwt_revocations_jti ON jwt_revocations(jti);
 CREATE INDEX idx_jwt_revocations_expires_at ON jwt_revocations(expires_at);
 CREATE INDEX idx_apple_auth_sessions_user_id ON apple_auth_sessions(user_id);
+
+-- Background checks
+CREATE INDEX idx_background_checks_user_id ON background_checks(user_id);
+CREATE INDEX idx_background_checks_status ON background_checks(user_id, status);
 
 -- Identity credentials
 CREATE INDEX idx_identity_credentials_user_id ON identity_credentials(user_id);
