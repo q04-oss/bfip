@@ -9,6 +9,29 @@ Versions follow [Semantic Versioning](https://semver.org):
 
 ---
 
+## v0.1.2 — 2026-05-01
+
+Added cleared status, trust registry, business participation lifecycle, and mesh network extension.
+
+### Added
+- Section 7b: Cleared status — optional post-attestation elevation requiring full background check suite (sanctions + identity fraud + criminal + sex offender + adverse media)
+- Section 18: Trust Registry — Box Fraise as credential issuer not directory, public key infrastructure, offline verification model
+- Section 19: Business participation lifecycle — from strawberry delivery to critical business infrastructure
+- `cleared` token_type on soultokens — separate credential, independently revocable
+- `attested_soultoken_id` on soultokens — cleared soultoken references the attested soultoken that qualified it
+- `cleared_at` and `cleared_soultoken_id` fields on users
+- `criminal`, `sex_offender`, `adverse_media` check types activated in background_checks
+- `cleared_status_granted` and `cleared_status_revoked` verification event types
+- `extensions/mesh.md` — mesh network extension reserved for v0.3.x covering beacon mesh nodes, iPhone mesh nodes, and verified physical encounters
+- Reserved mesh tables documented in schema.sql
+
+### Not changed
+- All existing stages unchanged
+- Sanctions and identity fraud remain Stage 1b requirements for attested
+- No breaking changes
+
+---
+
 ## v0.1.1 — 2026-05-01
 
 Added Stage 1b: background checks (sanctions screening and identity fraud).

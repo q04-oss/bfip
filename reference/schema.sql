@@ -64,6 +64,12 @@ CREATE TABLE users (
     attested_at                     TIMESTAMPTZ,
     soultoken_id                    INTEGER,
                                     -- FK added after soultokens created
+    cleared_at                      TIMESTAMPTZ,
+                                    -- when cleared status was granted
+    cleared_soultoken_id            INTEGER,
+                                    -- FK added after soultokens created
+                                    -- separate credential from soultoken_id
+                                    -- independently revocable
     platform_gift_eligible_after    TIMESTAMPTZ,
                                     -- set to gifted_at + 6 months on platform gift
                                     -- enforces one platform-covered gift per 6 months
@@ -192,9 +198,12 @@ CREATE TABLE background_checks (
     check_type                      TEXT NOT NULL
                                     CHECK (check_type IN (
                                         'sanctions',
-                                        'identity_fraud'
+                                        'identity_fraud',
+                                        'criminal'
                                     )),
-                                    -- criminal and adverse_media reserved for future versions
+                                    -- sanctions + identity_fraud required for attested
+                                    -- criminal required for cleared (optional elevation)
+                                    -- adverse_media reserved for future versions
     external_check_id               TEXT,
                                     -- provider-assigned check identifier for audit
     status                          TEXT NOT NULL DEFAULT 'pending'
@@ -275,8 +284,19 @@ CREATE TABLE soultokens (
     token_type                      TEXT NOT NULL
                                     CHECK (token_type IN (
                                         'user',
-                                        'business'
+                                        'business',
+                                        'cleared'
                                     )),
+                                    -- user: standard attested soultoken
+                                    -- business: business soultoken
+                                    -- cleared: optional elevated status soultoken
+    attested_soultoken_id           INTEGER,
+                                    -- FK added after soultokens self-references resolve
+                                    -- populated when token_type = 'cleared'
+                                    -- references the attested soultoken that qualified this user
+    CONSTRAINT cleared_soultoken_requires_attested CHECK (
+        token_type != 'cleared' OR attested_soultoken_id IS NOT NULL
+    ),
     business_id                     INTEGER,
                                     -- FK added after businesses created
                                     -- NOT NULL when token_type = 'business'
@@ -1257,6 +1277,8 @@ CREATE TABLE verification_events (
                                         'background_check_passed',
                                         'background_check_failed',
                                         'background_check_review_required',
+                                        'cleared_status_granted',
+                                        'cleared_status_revoked',
                                         'cooling_period_started',
                                         'cooling_app_open_recorded',
                                         'cooling_period_completed',
@@ -1412,9 +1434,38 @@ COMMENT ON TABLE audit_request_log IS
     'Proves the platform honoured the user''s right of access (PIPEDA, GDPR Article 15). '
     'requested_by is usually the user themselves but platform_admin can request on behalf.';
 
+-- Deferred FK from users to cleared soultokens
+ALTER TABLE users
+    ADD CONSTRAINT users_cleared_soultoken_fk
+    FOREIGN KEY (cleared_soultoken_id) REFERENCES soultokens(id);
+
+-- Deferred FK for attested_soultoken_id on cleared soultokens
+ALTER TABLE soultokens
+    ADD CONSTRAINT soultokens_attested_soultoken_fk
+    FOREIGN KEY (attested_soultoken_id) REFERENCES soultokens(id);
+
 -- =============================================================
--- SECTION 10: PLATFORM CONFIGURATION
+-- RESERVED: MESH NETWORK TABLES (extensions/mesh.md)
+-- These tables are not created in v0.1.2.
+-- They are documented here as reserved for the mesh extension.
+--
+-- beacon_peers — neighboring beacon relationships
+--   beacon_id, peer_beacon_id, discovered_at, last_seen_at
+--
+-- mesh_events — inter-beacon communications
+--   source_beacon_id, destination_beacon_id, event_type,
+--   payload_hash, relayed_at
+--
+-- offline_presence_events — presence events relayed through mesh
+--   presence_event_id, relay_beacon_id, relay_device_id,
+--   relayed_at, server_received_at
+--
+-- verified_encounters — two attested users in physical proximity
+--   user_a_id, user_b_id, location_beacon_id, proximity_cm,
+--   user_a_signature, user_b_signature, occurred_at
 -- =============================================================
+
+
 
 -- BFIP Section 15 | Runtime-configurable protocol parameters
 CREATE TABLE platform_configuration (
@@ -1756,8 +1807,10 @@ CREATE TRIGGER presence_thresholds_updated_at
 --     'Months between platform-covered gift boxes per user'),
 --    ('delivery_staff_reveal_hours', '2', 'integer',
 --     'Hours before window to reveal exact schedule to delivery staff'),
---    ('business_notification_hours', '4', 'integer',
---     'Hours before window for business notification');
+--    ('background_check_expiry_months', '12', 'integer',
+--     'Months before a background check result expires and must be re-run'),
+--    ('cleared_requires_all_checks', 'true', 'boolean',
+--     'All five background check types required for cleared status'),
 --
 -- =============================================================
 -- TEST FIXTURE MINIMUM
