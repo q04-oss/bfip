@@ -1,0 +1,602 @@
+# Box Fraise Identity Protocol
+## Specification v0.1.0
+
+**Status:** Draft
+**Date:** 2026-05-01
+**Authors:** Box Fraise / Rajzyngier Foundation
+
+---
+
+## Abstract
+
+The Box Fraise Identity Protocol (BFIP) defines a standard for establishing cryptographically verifiable human identity through in-person physical presence. Unlike digital identity systems that rely on document scanning, phone numbers, or social graphs, BFIP requires a real person to physically attend a registered location multiple times and be confirmed in person by a Box Fraise employee. The output is a soultoken — a non-transferable, cryptographically signed credential that proves a specific device belongs to a verified human who has demonstrated genuine physical presence.
+
+---
+
+## 1. Definitions
+
+**User** — a natural person seeking verified status under BFIP.
+
+**Business** — a physical location registered on the Box Fraise platform and participating in the BFIP verification network.
+
+**Beacon** — a Bluetooth Low Energy (BLE) device installed at a registered business location, broadcasting a daily rotating UUID derived via HMAC.
+
+**Delivery staff** — a Box Fraise employee authorised to perform in-person attestations and activate box NFC chips.
+
+**Attestation reviewer** — a Box Fraise employee authorised to remotely co-sign attestations after reviewing cryptographic evidence.
+
+**Soultoken** — a non-transferable, cryptographically signed credential issued by Box Fraise upon successful completion of the BFIP verification protocol.
+
+**Presence event** — a recorded instance of a user being physically present at a registered business location, verified via beacon dwell or box NFC tap.
+
+**Presence session** — a continuous period of beacon detection at a single business location constituting one presence event.
+
+**Attestation** — the final human verification step in which a delivery staff member confirms a user's physical presence and identity, co-signed by two attestation reviewers.
+
+**Box NFC chip** — an NFC chip embedded in a Box Fraise delivery box, activated at delivery time and valid for a single tap within the delivery window.
+
+**Evidence package** — a cryptographic bundle containing a photo, GPS coordinates, and a beacon witness HMAC captured during a staff visit.
+
+**Cooling period** — a mandatory waiting period following identity confirmation during which behavioral signals are collected.
+
+---
+
+## 2. Protocol overview
+
+BFIP verification proceeds through four sequential stages. A user must complete each stage before advancing to the next. Stages cannot be skipped or reordered.
+
+```
+Stage 1: Identity confirmation
+        ↓
+Stage 2: Cooling period
+        ↓
+Stage 3: Presence verification
+        ↓
+Stage 4: Staff attestation
+        ↓
+    Soultoken issued
+```
+
+---
+
+## 3. Stage 1 — Identity confirmation
+
+### 3.1 Purpose
+Establish that the user is a real person with a verifiable identity document.
+
+### 3.2 Credential types
+At protocol version v0.1.0, the following credential types are supported:
+
+| Type | Description | Status |
+|------|-------------|--------|
+| stripe_identity | Stripe Identity document verification | Active |
+| mdl | ISO 18013-5 Mobile Driver's License | Reserved (v0.2.x) |
+| eidas | EU eIDAS 2.0 digital identity wallet | Reserved (v0.2.x) |
+
+### 3.3 Requirements
+- The user must complete identity verification via a supported credential type
+- The raw verification response must be stored with an integrity hash
+- The credential type and external session ID must be recorded
+- Identity confirmation transitions the user to `identity_confirmed` status
+
+### 3.4 Failure
+- If identity verification fails, the user remains in `registered` status
+- Failed attempts are recorded in the audit log
+- Users may retry with the same or a different credential type
+
+---
+
+## 4. Stage 2 — Cooling period
+
+### 4.1 Purpose
+Prevent coordinated attacks using stolen identity documents. Establish that the account is being used by a real person over time.
+
+### 4.2 Duration
+7 days from the timestamp of identity confirmation.
+
+### 4.3 Behavioral requirements
+During the cooling period, the user must open the Box Fraise application on at least 3 separate calendar days. Each app open must:
+- Come from a genuine iOS device verified via Apple App Attest
+- Be recorded with the device identifier and attestation assertion
+- Occur on a calendar date not previously recorded for this credential
+
+The required number of app opens is stored per credential record (`cooling_app_opens_required`, default 3) to ensure historical records remain auditable if the requirement changes.
+
+### 4.4 Completion
+The cooling period is complete when both conditions are met:
+- 7 days have elapsed since identity confirmation
+- 3 app opens on 3 separate calendar days have been recorded
+
+Completion is recorded as `cooling_completed_at` on the identity credential record and triggers a `cooling_period_completed` verification event.
+
+### 4.5 Failure
+If the cooling period expires (7 days pass) without completing the behavioral requirement, a `cooling_period_failed` verification event is recorded. The user must restart Stage 1.
+
+---
+
+## 5. Stage 3 — Presence verification
+
+### 5.1 Purpose
+Establish that the user physically attends a registered business location on multiple separate occasions.
+
+### 5.2 Business assignment
+Upon completing the cooling period, the user is assigned to a single business for presence verification. This assignment is recorded in the presence threshold record. The user must complete all presence events at this single business. There is no multi-business fallback.
+
+If the assigned business loses beacon privileges before the user completes their threshold, the user's threshold record is reset and they are reassigned to a new business. No count is preserved.
+
+### 5.3 Presence event types
+
+**Beacon dwell**
+- The user's iOS application detects the business beacon continuously for a minimum of 15 minutes
+- The beacon UUID must match the expected HMAC-derived UUID for the current calendar day
+- The received signal strength (RSSI) must meet or exceed the beacon's configured minimum threshold (default: -70 dBm)
+- The RSSI threshold applied at the time of the event is recorded on the event record
+- An Apple App Attest assertion must be provided proving the event came from a genuine iOS device
+- A beacon witness HMAC must be provided proving the event occurred at this specific beacon on this specific day
+
+**Box NFC tap**
+- The user taps a Box Fraise delivery box NFC chip during an active delivery window
+- The chip must be activated (delivery staff signature present)
+- The chip must not have been previously tapped (single-use)
+- The tap must occur before the chip's expiry timestamp
+- An Apple App Attest assertion must be provided
+
+### 5.4 Qualifying events
+A presence event is qualifying if:
+- The event type requirements (5.3) are fully met
+- The event occurs on a calendar date not previously recorded as qualifying for this user at this business
+- The minimum dwell time is met (beacon dwell events only)
+- The RSSI threshold is met (beacon dwell events only)
+
+Non-qualifying events are still recorded with a rejection reason for audit purposes.
+
+### 5.5 Threshold
+The presence threshold is met when the user has recorded 3 qualifying presence events at their assigned business across 3 separate calendar days.
+
+Upon meeting the threshold:
+- The user transitions to `presence_confirmed` status
+- A `presence_threshold_met` verification event is recorded
+- The IDs of the 3 qualifying events are recorded in the qualifying_presence_events junction table
+
+### 5.6 Presence sessions
+A presence session groups multiple beacon pings within a single continuous dwell period. Each session:
+- Is bound to a single device via App Attest device identifier
+- Records start time, end time, and total dwell minutes
+- Is evaluated as qualifying or non-qualifying as a unit
+
+---
+
+## 6. Stage 4 — Staff attestation
+
+### 6.1 Purpose
+Provide a final human verification layer that cannot be automated or replicated digitally.
+
+### 6.2 Eligibility
+A user may initiate Stage 4 only after reaching `presence_confirmed` status.
+
+### 6.3 Staff visit
+Attestation occurs during a Box Fraise staff visit to the user's assigned business. Staff visits are unified events that may include delivery, support, quality assessment, or attestation — or any combination. Every Box Fraise employee visit to a business is a potential attestation opportunity.
+
+Staff visits are scheduled in advance. The exact schedule is revealed to delivery staff 2 hours before the visit window. Partner businesses receive a 4-hour window notification without an exact time.
+
+### 6.4 Attestation initiation
+During a staff visit, a delivery staff member may initiate an attestation for a user who:
+- Is present at the business during the visit window
+- Is in `presence_confirmed` status
+- Has not previously been attested
+
+The delivery staff member:
+1. Confirms the user is physically present
+2. Confirms the user's identity in person
+3. Takes a photo (hash stored, photo stored in secure storage)
+4. Signs the attestation record using their device's Secure Enclave key
+
+### 6.5 Reviewer assignment
+Two attestation reviewers are automatically assigned to every staff visit before it occurs. Assignment follows a round-robin algorithm with these constraints:
+- Neither reviewer may be the same person as the delivery staff member
+- Neither reviewer may have worked at the same location as the delivery staff member in the previous 30 days
+- The two reviewers may not have co-signed together more than 3 times in the previous 7 days
+- Assignment is locked before the delivery visit
+
+The assignment algorithm version is recorded for audit purposes.
+
+### 6.6 Co-signature
+Within 48 hours of the delivery staff member's signature, both assigned reviewers must independently review the evidence package and co-sign via Face ID on their device's Secure Enclave.
+
+Reviewers sign the evidence hash — not the raw evidence. The evidence hash covers the delivery photo, GPS coordinates at arrival, and the beacon witness HMAC for that day. Signing the hash proves the reviewer evaluated specific evidence.
+
+Both reviewers must sign for the attestation to be approved. If either reviewer rejects, the attestation is void and the user returns to `presence_confirmed` status. The attempt is recorded in full.
+
+### 6.7 Deadline enforcement
+If a reviewer fails to sign within 48 hours:
+- The missed deadline is recorded with timestamp
+- A replacement reviewer is automatically assigned
+- The replacement reviewer has a new 48-hour window
+- The original reviewer's miss is recorded in the audit log
+
+### 6.8 Rejection
+If an attestation is rejected by a reviewer:
+- The rejection is recorded with reason and reviewer ID
+- The user returns to `presence_confirmed` status
+- The user's attempt number is incremented
+- The user must wait for the next staff visit to try again
+- All rejection history is preserved permanently in attestation_attempts
+
+### 6.9 Approval
+When both reviewers have signed:
+- The attestation status transitions to `approved`
+- The user transitions to `attested` status
+- A soultoken is issued (see Section 7)
+- An `attestation_approved` verification event is recorded
+
+---
+
+## 7. Soultoken specification
+
+### 7.1 Purpose
+A soultoken is the output of the BFIP verification protocol. It is a non-transferable credential proving that a specific device belongs to a verified human.
+
+### 7.2 Identifiers
+
+**Internal identifier (uuid)**
+A UUID v4 generated at issuance. Never exposed externally. Used for all internal database references.
+
+**Display code**
+A human-readable code derived from the UUID via HMAC-SHA256. Format: `XXXX-XXXX-XXXX` where X is an uppercase alphanumeric character (A-Z, 0-9). See `reference/cryptography.md` for the exact derivation. This is what users and third parties reference.
+
+**Admin reference**
+The string `FRS-` concatenated with the first 8 characters of the UUID in uppercase, generated at display time only. Never stored. Used internally by Box Fraise staff for support interactions.
+
+**Third-party tokens**
+Third parties do not receive any soultoken identifier. They receive a signed, scoped, short-lived attestation token (see Section 9).
+
+### 7.3 Verification chain
+Every user soultoken references:
+- The identity credential that completed Stage 1
+- The presence threshold record that completed Stage 3
+- The visit attestation that completed Stage 4
+
+This chain is immutable and preserved even if subsequent records are modified or revoked.
+
+### 7.4 Signature
+The soultoken is signed with Box Fraise's Ed25519 private key. The signature covers:
+`uuid || holder_user_id || issued_at || expires_at || display_code`
+
+Any modification to these fields invalidates the signature.
+
+### 7.5 Expiry
+Soultokens expire 12 months from issuance.
+
+### 7.6 Renewal
+A soultoken may be renewed by completing one qualifying presence event (beacon dwell or box NFC tap) before the expiry date. Renewal:
+- Extends `expires_at` by 12 months from the renewal date
+- Records the triggering presence event ID
+- Records the renewal type (beacon_dwell or nfc_tap)
+- Does not require a new attestation
+
+A revoked soultoken cannot be renewed.
+
+### 7.7 Revocation
+A soultoken may be revoked for the following reasons:
+
+| Reason | Description |
+|--------|-------------|
+| stripe_flag | Stripe Identity flags the user after issuance |
+| staff_rescission | A Box Fraise staff member rescinds the attestation |
+| platform_ban | The user is banned from the platform |
+| voluntary_surrender | The user voluntarily surrenders their soultoken |
+
+Revocation is permanent. A revoked soultoken cannot be reinstated. The user must restart the protocol from Stage 1.
+
+### 7.8 Voluntary surrender
+A user may voluntarily surrender their soultoken. Surrender must occur:
+- In person at a Box Fraise store or during a staff visit
+- Witnessed by a Box Fraise delivery staff member
+- The witnessing staff member's visit ID is recorded on the revocation record
+
+Voluntary surrender without a witness visit record is not valid.
+
+### 7.9 Future compatibility
+The soultoken record includes:
+- `vc_credential_json` — reserved for W3C Verifiable Credential issuance (v1.0.0)
+- `schema_version` — protocol schema version at issuance
+- `display_code_key_version` — HMAC key version used for display code derivation
+
+---
+
+## 8. Beacon protocol
+
+### 8.1 UUID derivation
+Each beacon broadcasts a UUID that rotates daily. The UUID is derived as:
+
+```
+uuid = HMAC-SHA256(secret_key, business_id || ':' || date_string)
+```
+
+Where:
+- `secret_key` is the beacon's registered HMAC secret
+- `business_id` is the integer ID of the owning business
+- `date_string` is the current date in `YYYY-MM-DD` format in UTC
+- The output is formatted as a standard UUID v4 string
+
+### 8.2 Key rotation
+If a beacon's secret key is compromised, it may be rotated. During rotation:
+- The previous key is preserved for a 24-hour grace period
+- Events validated against either the current or previous key are accepted during the grace period
+- After 24 hours, the previous key is invalidated
+
+### 8.3 Witness HMAC
+A beacon witness HMAC is included in every presence event. It is derived as:
+
+```
+witness = HMAC-SHA256(secret_key, business_id || ':' || date_string || ':' || user_id)
+```
+
+This proves the presence event occurred at this specific beacon for this specific user on this specific day. It cannot be replayed for a different user or a different day.
+
+### 8.4 Health monitoring
+Beacons are monitored for availability and signal strength. Consecutive failures increment the failure counter. Businesses are notified when their beacon's failure count exceeds defined thresholds.
+
+---
+
+## 9. Box NFC chip protocol
+
+### 9.1 Chain of custody
+Each box NFC chip carries a chain of custody:
+
+1. **Pack signature** — applied at the Box Fraise facility when the box is packed. Signed with the facility's Secure Enclave key.
+2. **Delivery signature** — applied by delivery staff when the box is activated at the business. Signed with the staff member's Secure Enclave key.
+3. **Tap record** — recorded when a user taps the chip. Includes user ID, timestamp, and App Attest assertion.
+
+The chain of custody hash covers all three stages. In v0.1.0, pack signatures are optional (nullable). Full chain enforcement is reserved for a future version.
+
+### 9.2 Delivery window
+A box NFC chip is valid for user taps from the moment of activation until the delivery window closes. The delivery window is defined per staff visit. After expiry, tap attempts are rejected and recorded.
+
+### 9.3 Single-use enforcement
+Each chip may be tapped exactly once. A second tap attempt sets `clone_detected = true` on the box record and triggers a platform alert.
+
+---
+
+## 10. Staff visit protocol
+
+### 10.1 Unified visit model
+Every Box Fraise employee visit to a business is a single unified event regardless of purpose. A visit may include any combination of:
+- Strawberry box delivery
+- User attestation
+- Quality assessment
+- Support interaction
+
+### 10.2 Schedule security
+- Delivery schedules are revealed to delivery staff 2 hours before the visit window
+- Partner businesses receive a 4-hour window notification without an exact time
+- Exact routes are not stored in the database
+
+### 10.3 Evidence package
+Every visit produces an evidence package consisting of:
+- A photo taken by delivery staff at arrival
+- GPS coordinates at arrival (stored separately for queryability)
+- The beacon witness HMAC for that day
+
+The evidence package is hashed (SHA-256). Reviewers sign the hash, not the raw evidence. The raw evidence is stored in secure storage referenced by URI.
+
+### 10.4 Dual signature requirement
+Every staff visit attestation requires two signatures from designated attestation reviewers. The two-reviewer requirement is enforced at the application layer. Reviewer assignments are locked before the visit and recorded in the reviewer assignment log.
+
+---
+
+## 11. Attestation token specification
+
+### 11.1 Purpose
+Attestation tokens allow verified users to prove their BFIP status to third-party businesses without revealing any identifying information.
+
+### 11.2 Initiation
+Attestation tokens are user-initiated only. A third party cannot query the platform for a user's status. The user presents their token to the third party, who verifies it against the platform.
+
+### 11.3 Scope
+At v0.1.0, one scope is defined:
+
+| Scope | Meaning |
+|-------|---------|
+| presence.verified | The token holder is a verified human who has completed BFIP in-person presence verification |
+
+Future scopes are reserved: `presence.location`, `identity.age`.
+
+### 11.4 Token format
+An attestation token is:
+- A hashed token string (never stored in plaintext)
+- Scoped to a specific claim
+- Bound to the requesting business's soultoken
+- Valid for 15 minutes from issuance
+- Single-use
+
+### 11.5 Verification
+Third-party verification must:
+- Be initiated by the user presenting their token
+- Include the requesting business's soultoken for authentication
+- Include a request signature proving the business holds their soultoken private key
+- Be recorded in the verification attempt log regardless of outcome
+
+### 11.6 Third-party eligibility
+Only businesses with active soultokens may request attestation token verification. Anonymous API callers are not permitted.
+
+---
+
+## 12. Business protocol
+
+### 12.1 Creation requirements
+A business may only be created by a user in `attested` status. The creating user becomes the primary holder. Their soultoken status at the time of business creation is recorded and preserved.
+
+### 12.2 Business soultoken
+Upon creation, a business soultoken is issued. The business soultoken:
+- References the creating user's soultoken
+- Is non-transferable in v0.1.0 (primary holder transfer reserved for future version)
+- Is revoked if the primary holder's soultoken is revoked
+
+### 12.3 Quality assessment
+Every Box Fraise staff visit to a business includes a structured quality assessment covering:
+- Beacon functioning correctly
+- Partner staff performing correctly
+- Business standards maintained
+- Overall pass/fail
+
+A running history of assessments is maintained. Three failed assessments within any 12-month rolling window triggers beacon suspension. Beacon suspension prevents new presence events at that business.
+
+### 12.4 Beacon suspension
+When a business reaches two failed assessments in a 12-month window, no new users are assigned to that business for presence verification. When three failed assessments are reached, the business's beacons are suspended and an alert is issued.
+
+---
+
+## 13. Verification status model
+
+Users progress through four statuses:
+
+| Status | Meaning |
+|--------|---------|
+| registered | Account created, no verification started |
+| identity_confirmed | Stage 1 and Stage 2 complete |
+| presence_confirmed | Stage 3 complete, awaiting Stage 4 |
+| attested | All stages complete, soultoken issued |
+
+Status transitions are append-only. Every transition is recorded as a verification event with timestamp, actor, and reference to the triggering record.
+
+---
+
+## 14. Audit and immutability
+
+The following records are append-only and protected by database-level triggers:
+- `audit_events` — global platform audit log
+- `verification_events` — user verification journey
+- `attestation_attempts` — full history of attestation attempts including rejections
+- `gift_box_history` — platform-covered gift box audit trail
+- `business_assessment_history` — business quality assessment history
+- `platform_configuration_history` — configuration change history
+
+No record in these tables may be updated or deleted. Corrections are made by inserting new records.
+
+---
+
+## 15. Platform configuration
+
+The following protocol parameters are configurable at runtime without code deployment:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| cooling_period_days | 7 | Days from identity confirmation to cooling end |
+| cooling_app_opens_required | 3 | App opens required during cooling period |
+| presence_events_required | 3 | Qualifying presence events required |
+| presence_days_required | 3 | Separate calendar days required |
+| min_dwell_minutes | 15 | Minimum beacon dwell time |
+| default_rssi_threshold | -70 | Default minimum RSSI in dBm |
+| soultoken_expiry_months | 12 | Soultoken validity period |
+| attestation_token_expiry_minutes | 15 | Third-party token validity |
+| co_sign_deadline_hours | 48 | Reviewer co-sign window |
+| platform_gift_limit_months | 6 | Months between platform-covered gifts |
+| delivery_staff_reveal_hours | 2 | Hours before window to reveal exact schedule to staff |
+| business_notification_hours | 4 | Hours before window for business notification |
+
+---
+
+## 16. Extension points
+
+The following capabilities are defined as extension points in v0.1.0 and reserved for future protocol versions.
+
+### 16.1 Hardware binding (reserved v0.2.x)
+Proprietary Box Fraise hardware will replace App Attest as the device attestation mechanism. The `hardware_identifier` field on presence events and `hardware_key_id` on beacons are reserved for this purpose.
+
+### 16.2 Government credential integration (reserved v0.2.x)
+ISO 18013-5 Mobile Driver's License (mDL) and EU eIDAS 2.0 digital identity credentials will be accepted as identity confirmation credential types. The `credential_type` field is designed to accommodate these without schema migration.
+
+### 16.3 Zero Knowledge Proofs (reserved v1.0.0)
+A ZK proof layer will allow users to prove BFIP status without revealing any identifying information, including to Box Fraise. The `vc_credential_json` field on soultokens is reserved for W3C Verifiable Credential issuance.
+
+### 16.4 On-chain soultoken migration (reserved v1.0.0)
+Soultokens will be migrated to a public blockchain as non-transferable tokens. The off-chain soultoken data model is designed to mirror the on-chain structure to make migration non-breaking.
+
+---
+
+## 17. User audit rights
+
+### 17.1 Purpose
+A verified user has the right to inspect their complete verification history. This is both a trust signal — users can see exactly what Box Fraise recorded about them — and a legal requirement in many jurisdictions including Canada (PIPEDA) and the EU (GDPR Article 15).
+
+### 17.2 Audit trail contents
+A user may request their complete audit trail at any time. The audit trail contains:
+
+**Verification journey**
+- Every verification event in chronological order — identity confirmation, cooling period events, presence events, attestation attempts, soultoken issuance, renewals, and revocations
+- The outcome of every attestation attempt including rejection reasons
+- The staff visit ID of the staff member who performed their attestation (not the staff member's identity)
+- The business ID where they were verified (not the business name unless the user already knows it)
+- Soultoken status, expiry date, and renewal history
+
+**Third-party token history**
+- Every attestation token the user has issued
+- Whether each token was used and when
+- Which business soultoken verified it (not the business identity)
+
+**Presence history**
+- Every presence event recorded, qualifying and non-qualifying
+- Rejection reasons for non-qualifying events
+- The business and calendar date of each event
+
+### 17.3 What the audit trail does not contain
+- The photo taken during attestation — this is Box Fraise operational evidence
+- GPS coordinates from the evidence package — this is Box Fraise operational evidence
+- Reviewer identities — reviewers are identified by staff ID only, not name
+- Other users' records
+- Internal platform configuration values
+
+### 17.4 Audit request log
+Every audit trail request is recorded in the audit request log with:
+- The requesting user ID
+- The timestamp of the request
+- The delivery method (in-app, in-person at Box Fraise store)
+
+This log is append-only and proves the platform honoured the user's right of access.
+
+### 17.5 Delivery
+Audit trails are delivered in-app as a structured record. For users who cannot access the app, audit trails may be requested in person at a Box Fraise store and delivered by a staff member.
+
+### 17.6 Retention
+Audit trails reflect all records retained by the platform. Data retention follows applicable law. Users may request deletion of their records subject to legal retention requirements. Deletion requests are processed in person at a Box Fraise store or during a scheduled support interaction.
+
+---
+
+## Appendix A — Verification event types
+
+| Event type | Triggered by |
+|------------|-------------|
+| identity_confirmed | Stripe/credential webhook |
+| cooling_period_started | Identity confirmation |
+| cooling_app_open_recorded | App open during cooling |
+| cooling_period_completed | 3rd qualifying app open after 7 days |
+| cooling_period_failed | Cooling period expired without completion |
+| presence_event_recorded | Beacon dwell or NFC tap |
+| presence_session_completed | Presence session evaluated |
+| presence_reset | User reassigned to new business |
+| presence_threshold_met | 3 qualifying events across 3 days |
+| attestation_initiated | Delivery staff begins attestation |
+| attestation_co_sign_pending | Staff signature complete, awaiting reviewers |
+| attestation_approved | Both reviewers co-signed |
+| attestation_rejected | Reviewer rejected attestation |
+| attestation_expired | Co-sign deadline passed |
+| soultoken_issued | Attestation approved |
+| soultoken_renewed | Renewal presence event recorded |
+| soultoken_revoked | Any revocation reason |
+| soultoken_surrender_requested | User initiates voluntary surrender |
+| soultoken_surrender_completed | Witnessed surrender complete |
+| business_approaching_suspension | 2nd failed assessment in 12 months |
+| business_suspended | 3rd failed assessment in 12 months |
+| beacon_suspended | Beacon deactivated due to business suspension |
+| reviewer_missed_deadline | Reviewer failed to sign within 48 hours |
+| reviewer_reassigned | Replacement reviewer assigned |
+| status_changed | Any verification status transition |
+
+---
+
+## Appendix B — Reference implementation
+
+See `reference/schema.sql` for the PostgreSQL reference implementation of BFIP v0.1.0.
+
+See `reference/cryptography.md` for exact cryptographic primitive specifications including HMAC derivation formulas, signature formats, and hash algorithms.
