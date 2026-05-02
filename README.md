@@ -28,7 +28,8 @@ BFIP is a presence protocol. The only thing it proves is that a real person was 
 
 | Version | Status | Date |
 |---------|--------|------|
-| v0.1.2 | Draft | 2026-05-01 |
+| v0.1.3 | Draft | 2026-05-01 |
+| v0.1.2 | Superseded | 2026-05-01 |
 | v0.1.1 | Superseded | 2026-05-01 |
 | v0.1.0 | Superseded | 2026-05-01 |
 

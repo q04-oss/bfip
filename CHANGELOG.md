@@ -9,6 +9,23 @@ Versions follow [Semantic Versioning](https://semver.org):
 
 ---
 
+## v0.1.3 — 2026-05-01
+
+Removed mesh extension from BFIP. Mesh protocol is now maintained
+as a separate specification at q04-oss/bfmp.
+
+### Changed
+- Removed extensions/mesh.md — moved to q04-oss/bfmp
+- Section 18.6: updated reference to point to BFMP at github.com/q04-oss/bfmp
+- Section 19.6: updated reference to point to BFMP at github.com/q04-oss/bfmp
+
+### Not changed
+- No protocol changes
+- No schema changes
+- All other sections unchanged
+
+---
+
 ## v0.1.2 — 2026-05-01
 
 Added cleared status, trust registry, business participation lifecycle, and mesh network extension.
